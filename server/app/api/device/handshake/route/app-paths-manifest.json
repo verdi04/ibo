@@ -1,0 +1,3 @@
+{
+  "/api/device/handshake/route": "app/api/device/handshake/route.js"
+}

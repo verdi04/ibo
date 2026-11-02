@@ -1,0 +1,12 @@
+{
+  "/_global-error/page": "app/_global-error/page.js",
+  "/_not-found/page": "app/_not-found/page.js",
+  "/api/device/change-key/route": "app/api/device/change-key/route.js",
+  "/api/device/decrypt/route": "app/api/device/decrypt/route.js",
+  "/api/device/handshake/route": "app/api/device/handshake/route.js",
+  "/api/portal/activate/route": "app/api/portal/activate/route.js",
+  "/api/portal/login/route": "app/api/portal/login/route.js",
+  "/api/portal/playlists/[id]/route": "app/api/portal/playlists/[id]/route.js",
+  "/api/portal/playlists/route": "app/api/portal/playlists/route.js",
+  "/page": "app/page.js"
+}

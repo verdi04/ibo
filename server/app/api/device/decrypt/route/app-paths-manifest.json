@@ -1,0 +1,3 @@
+{
+  "/api/device/decrypt/route": "app/api/device/decrypt/route.js"
+}

@@ -1,0 +1,12 @@
+{
+  "/_global-error/page": "/_global-error",
+  "/_not-found/page": "/_not-found",
+  "/api/device/change-key/route": "/api/device/change-key",
+  "/api/device/decrypt/route": "/api/device/decrypt",
+  "/api/device/handshake/route": "/api/device/handshake",
+  "/api/portal/activate/route": "/api/portal/activate",
+  "/api/portal/login/route": "/api/portal/login",
+  "/api/portal/playlists/[id]/route": "/api/portal/playlists/[id]",
+  "/api/portal/playlists/route": "/api/portal/playlists",
+  "/page": "/"
+}

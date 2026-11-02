@@ -1,0 +1,108 @@
+{
+  "version": 3,
+  "pages404": true,
+  "appType": "app",
+  "caseSensitive": false,
+  "basePath": "",
+  "redirects": [
+    {
+      "source": "/:path+/",
+      "destination": "/:path+",
+      "internal": true,
+      "priority": true,
+      "statusCode": 308,
+      "regex": "^(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))/$"
+    }
+  ],
+  "headers": [],
+  "onMatchHeaders": [],
+  "rewrites": {
+    "beforeFiles": [],
+    "afterFiles": [],
+    "fallback": []
+  },
+  "dynamicRoutes": [
+    {
+      "page": "/api/portal/playlists/[id]",
+      "regex": "^/api/portal/playlists/([^/]+?)(?:/)?$",
+      "routeKeys": {
+        "nxtPid": "nxtPid"
+      },
+      "namedRegex": "^/api/portal/playlists/(?<nxtPid>[^/]+?)(?:/)?$"
+    }
+  ],
+  "staticRoutes": [
+    {
+      "page": "/",
+      "regex": "^/(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/(?:/)?$"
+    },
+    {
+      "page": "/_global-error",
+      "regex": "^/_global\\-error(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_global\\-error(?:/)?$"
+    },
+    {
+      "page": "/_not-found",
+      "regex": "^/_not\\-found(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_not\\-found(?:/)?$"
+    },
+    {
+      "page": "/api/device/change-key",
+      "regex": "^/api/device/change\\-key(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/device/change\\-key(?:/)?$"
+    },
+    {
+      "page": "/api/device/decrypt",
+      "regex": "^/api/device/decrypt(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/device/decrypt(?:/)?$"
+    },
+    {
+      "page": "/api/device/handshake",
+      "regex": "^/api/device/handshake(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/device/handshake(?:/)?$"
+    },
+    {
+      "page": "/api/portal/activate",
+      "regex": "^/api/portal/activate(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/portal/activate(?:/)?$"
+    },
+    {
+      "page": "/api/portal/login",
+      "regex": "^/api/portal/login(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/portal/login(?:/)?$"
+    },
+    {
+      "page": "/api/portal/playlists",
+      "regex": "^/api/portal/playlists(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/portal/playlists(?:/)?$"
+    }
+  ],
+  "dataRoutes": [],
+  "rsc": {
+    "header": "rsc",
+    "varyHeader": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch",
+    "prefetchHeader": "next-router-prefetch",
+    "didPostponeHeader": "x-nextjs-postponed",
+    "contentTypeHeader": "text/x-component",
+    "suffix": ".rsc",
+    "prefetchSegmentHeader": "next-router-segment-prefetch",
+    "prefetchSegmentSuffix": ".segment.rsc",
+    "prefetchSegmentDirSuffix": ".segments",
+    "clientParamParsing": false,
+    "dynamicRSCPrerender": false
+  },
+  "rewriteHeaders": {
+    "pathHeader": "x-nextjs-rewritten-path",
+    "queryHeader": "x-nextjs-rewritten-query"
+  }
+}
