@@ -204,11 +204,12 @@ export async function POST(request) {
       playlists,
     };
 
-    // Check if plain debugging mode is requested
+    // Plain debugging mode is allowed only outside production
     const url = new URL(request.url);
     const allowPlain =
-      url.searchParams.get('plain') === 'true' ||
-      request.headers.get('x-plain-response') === 'true';
+      process.env.NODE_ENV !== 'production' &&
+      (url.searchParams.get('plain') === 'true' ||
+        request.headers.get('x-plain-response') === 'true');
 
     // Encrypt response payload using AES-256-GCM symmetric encryption
     const encryptedResult = encryptPayload(responsePayload);
