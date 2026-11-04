@@ -6,6 +6,7 @@ import {
   encryptPayload,
   decryptPassword,
   deriveEcdhSessionKey,
+  signHandshakeResponse,
 } from '@/lib/iptv-crypto';
 import { calculateDeviceStatus } from '@/lib/device-status';
 import {
@@ -223,6 +224,7 @@ export async function POST(request) {
     }
 
     // Protocol v2: per-session ECDH key agreement when the client offers an ephemeral public point
+    // Protocol v3 addition: that response is signed so the app can authenticate the server.
     const clientPubKey =
       typeof body.client_pubkey === 'string' ? body.client_pubkey.trim() : '';
 
@@ -234,17 +236,31 @@ export async function POST(request) {
         );
         const pairEncrypted = encryptPayload(responsePayload, aesKey);
 
+        const { signature } = signHandshakeResponse({
+          mac: normalizedMac,
+          clientPublicKey: clientPubKey,
+          serverPublicKey,
+          combined: pairEncrypted.combined,
+        });
+
         return NextResponse.json({
           success: true,
           encrypted: true,
           mode: 'pair',
           server_pubkey: serverPublicKey,
           payload: pairEncrypted.combined,
+          sig: signature,
         });
       } catch (pairError) {
-        console.error(
-          'ECDH pairing failed, falling back to legacy static-key encryption:',
-          pairError,
+        // Fail closed: a v2 client never receives an unsigned or legacy-key response,
+        // so an attacker cannot downgrade the handshake by corrupting client_pubkey.
+        console.error('ECDH pairing rejected:', pairError);
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'تعذر إتمام مصافحة الجهاز بأمان، يرجى المحاولة لاحقاً.',
+          },
+          { status: 500 },
         );
       }
     }
