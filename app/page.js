@@ -23,6 +23,7 @@ export default function IboPortal() {
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
+  const [now, setNow] = useState(() => Date.now());
 
   // Login form state
   const [macAddress, setMacAddress] = useState('');
@@ -54,7 +55,52 @@ export default function IboPortal() {
     if (session?.token && session?.device) {
       loadPlaylists(session.token);
     }
-  }, [session?.token, session?.device]);
+  }, [session?.token]);
+
+  // Re-render the subscription counters every minute so a day rollover is reflected
+  // without the visitor reloading the page.
+  useEffect(() => {
+    const tick = () => setNow(Date.now());
+    const interval = setInterval(tick, 60000);
+    window.addEventListener('focus', tick);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', tick);
+    };
+  }, []);
+
+  // A seller can extend this device while its own dashboard is open, so the row is read
+  // again on mount and then periodically rather than kept as the login snapshot.
+  useEffect(() => {
+    const token = session?.token;
+    if (!token || !session?.device) return undefined;
+
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const res = await fetch('/api/portal/status', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const data = await res.json();
+        if (cancelled || !res.ok || !data.success) return;
+        setSession((prev) => {
+          if (!prev || !prev.device) return prev;
+          const next = { ...prev, device: data.device };
+          sessionStorage.setItem('iptv_portal_session', JSON.stringify(next));
+          return next;
+        });
+      } catch (err) {
+        console.error('Unable to refresh the subscription status:', err);
+      }
+    };
+
+    refresh();
+    const interval = setInterval(refresh, 5 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [session?.token]);
 
   // Format MAC address input automatically
   function formatMac(raw) {
@@ -409,6 +455,41 @@ export default function IboPortal() {
     } catch (err) {
       console.error('Failed to toggle status:', err);
     }
+  }
+
+  // Mirrors lib/device-status.js so the counters follow the absolute expiry timestamps
+  // instead of the days_remaining value returned when the session was created.
+  function licenseState(row) {
+    if (!row) return { status: 'expired', daysRemaining: 0 };
+
+    const licenseExp = row.license_expires_at
+      ? new Date(row.license_expires_at).getTime()
+      : null;
+    const trialExp = row.trial_ends_at ? new Date(row.trial_ends_at).getTime() : null;
+    const dayMs = 1000 * 60 * 60 * 24;
+
+    if (licenseExp && licenseExp > now) {
+      return {
+        status: 'active',
+        daysRemaining: Math.max(0, Math.ceil((licenseExp - now) / dayMs)),
+      };
+    }
+    if (trialExp && trialExp > now) {
+      return {
+        status: 'trial',
+        daysRemaining: Math.max(0, Math.ceil((trialExp - now) / dayMs)),
+      };
+    }
+    return { status: 'expired', daysRemaining: 0 };
+  }
+
+  function formatLocalDate(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleDateString('ar-EG', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
   }
 
   // Helpers for Status Styles & Badges
@@ -861,7 +942,7 @@ export default function IboPortal() {
                   <div>
                     <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>الحالة</div>
                     {(() => {
-                      const badge = getStatusBadge(adminTarget.status);
+                      const badge = getStatusBadge(licenseState(adminTarget).status);
                       return (
                         <span
                           style={{
@@ -881,14 +962,19 @@ export default function IboPortal() {
                   </div>
                   <div>
                     <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>الأيام المتبقية</div>
-                    <div style={{ fontSize: 18, fontWeight: 700, color: adminTarget.days_remaining > 0 ? '#10b981' : '#ef4444' }}>
-                      {adminTarget.days_remaining || 0} يوم
-                    </div>
+                    {(() => {
+                      const { daysRemaining } = licenseState(adminTarget);
+                      return (
+                        <div style={{ fontSize: 18, fontWeight: 700, color: daysRemaining > 0 ? '#10b981' : '#ef4444' }}>
+                          {daysRemaining} يوم
+                        </div>
+                      );
+                    })()}
                   </div>
                   <div>
                     <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>انتهاء الترخيص</div>
                     <div style={{ fontSize: 15, fontWeight: 700 }}>
-                      {adminTarget.license_expires_at ? adminTarget.license_expires_at.slice(0, 10) : '—'}
+                      {formatLocalDate(adminTarget.license_expires_at)}
                     </div>
                   </div>
                   <div>
@@ -900,7 +986,7 @@ export default function IboPortal() {
                   <div>
                     <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>آخر ظهور للجهاز</div>
                     <div style={{ fontSize: 15, fontWeight: 700 }}>
-                      {adminTarget.last_seen_at ? adminTarget.last_seen_at.slice(0, 10) : '—'}
+                      {formatLocalDate(adminTarget.last_seen_at)}
                     </div>
                   </div>
                 </div>
@@ -965,7 +1051,7 @@ export default function IboPortal() {
                       بيانات الجهاز المشترك
                     </h2>
                     {(() => {
-                      const badge = getStatusBadge(session.device.status);
+                      const badge = getStatusBadge(licenseState(session.device).status);
                       return (
                         <span
                           style={{
@@ -1031,22 +1117,23 @@ export default function IboPortal() {
 
                 <div style={{ background: '#f8fafc', padding: '14px 18px', borderRadius: 12 }}>
                   <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>الأيام المتبقية</div>
-                  <div style={{ fontSize: 18, fontWeight: 700, color: session.device.days_remaining > 0 ? '#10b981' : '#ef4444' }}>
-                    {session.device.days_remaining || 0} يوم
-                  </div>
+                  {(() => {
+                    const { daysRemaining } = licenseState(session.device);
+                    return (
+                      <div style={{ fontSize: 18, fontWeight: 700, color: daysRemaining > 0 ? '#10b981' : '#ef4444' }}>
+                        {daysRemaining} يوم
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 <div style={{ background: '#f8fafc', padding: '14px 18px', borderRadius: 12 }}>
                   <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>تاريخ الانتهاء</div>
                   <div style={{ fontSize: 14, fontWeight: 600 }}>
                     {session.device.license_expires_at
-                      ? new Date(session.device.license_expires_at).toLocaleDateString('ar-EG', {
-                          year: 'numeric',
-                          month: 'long',
-                          day: 'numeric',
-                        })
+                      ? formatLocalDate(session.device.license_expires_at)
                       : session.device.trial_ends_at
-                      ? `تجربة: ${new Date(session.device.trial_ends_at).toLocaleDateString('ar-EG')}`
+                      ? `تجربة: ${formatLocalDate(session.device.trial_ends_at)}`
                       : 'منتهي'}
                   </div>
                 </div>
