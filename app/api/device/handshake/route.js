@@ -5,6 +5,7 @@ import {
   generateDeviceKey,
   encryptPayload,
   decryptPassword,
+  deriveEcdhSessionKey,
 } from '@/lib/iptv-crypto';
 import { calculateDeviceStatus } from '@/lib/device-status';
 import {
@@ -204,24 +205,52 @@ export async function POST(request) {
       playlists,
     };
 
-    // Plain debugging mode is allowed only outside production
+    // Check if plain debugging mode is requested
     const url = new URL(request.url);
     const allowPlain =
       process.env.NODE_ENV !== 'production' &&
       (url.searchParams.get('plain') === 'true' ||
         request.headers.get('x-plain-response') === 'true');
 
-    // Encrypt response payload using AES-256-GCM symmetric encryption
-    const encryptedResult = encryptPayload(responsePayload);
-
     if (allowPlain) {
+      const encryptedPreview = encryptPayload(responsePayload);
       return NextResponse.json({
         success: true,
         encrypted: false,
         payload: responsePayload,
-        encrypted_preview: encryptedResult.combined,
+        encrypted_preview: encryptedPreview.combined,
       });
     }
+
+    // Protocol v2: per-session ECDH key agreement when the client offers an ephemeral public point
+    const clientPubKey =
+      typeof body.client_pubkey === 'string' ? body.client_pubkey.trim() : '';
+
+    if (clientPubKey) {
+      try {
+        const { aesKey, serverPublicKey } = deriveEcdhSessionKey(
+          clientPubKey,
+          normalizedMac,
+        );
+        const pairEncrypted = encryptPayload(responsePayload, aesKey);
+
+        return NextResponse.json({
+          success: true,
+          encrypted: true,
+          mode: 'pair',
+          server_pubkey: serverPublicKey,
+          payload: pairEncrypted.combined,
+        });
+      } catch (pairError) {
+        console.error(
+          'ECDH pairing failed, falling back to legacy static-key encryption:',
+          pairError,
+        );
+      }
+    }
+
+    // Legacy path for already-installed APKs (static APP_SECRET_KEY)
+    const encryptedResult = encryptPayload(responsePayload);
 
     return NextResponse.json({
       success: true,
