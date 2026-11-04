@@ -4,10 +4,14 @@ import {
   normalizeMac,
   generateDeviceKey,
   encryptPayload,
+  safeEquals,
 } from '@/lib/iptv-crypto';
 import {
   getClientIp,
   checkEndpointRateLimit,
+  checkLoginRateLimit,
+  recordFailedLogin,
+  resetLoginRateLimit,
 } from '@/lib/rate-limiter';
 
 export async function POST(request) {
@@ -61,6 +65,25 @@ export async function POST(request) {
       );
     }
 
+    const keyRateLimitKey = `change_key:${clientIp}:${normalizedMac}`;
+    const keyAttemptCheck = checkLoginRateLimit(keyRateLimitKey, 5, 15 * 60 * 1000);
+    if (!keyAttemptCheck.allowed) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'تم حظر المحاولات مؤقتاً بسبب تكرار إدخال بيانات خاطئة. يرجى المحاولة بعد 15 دقيقة.',
+          retry_after: keyAttemptCheck.retryAfterSeconds,
+        },
+        {
+          status: 429,
+          headers: {
+            'Retry-After': String(keyAttemptCheck.retryAfterSeconds),
+          },
+        },
+      );
+    }
+
     const { data: device, error: selectError } = await supabase
       .from('devices')
       .select('*')
@@ -82,19 +105,25 @@ export async function POST(request) {
       );
     }
 
-    // If current key or device_key was provided, verify it
+    // Rotating a key is a privilege-changing action: the caller must prove it already
+    // holds the current one, and must not be allowed to discover it by guessing.
     const providedKey = current_key || device_key;
-    if (providedKey && typeof providedKey === 'string') {
-      if (providedKey.trim() !== device.device_key) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: 'مفتاح الجهاز الحالي غير صحيح.',
-          },
-          { status: 401 },
-        );
-      }
+    if (
+      typeof providedKey !== 'string' ||
+      !providedKey.trim() ||
+      !safeEquals(providedKey.trim(), device.device_key)
+    ) {
+      recordFailedLogin(keyRateLimitKey, 15 * 60 * 1000);
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'مفتاح الجهاز الحالي مطلوب وغير صحيح.',
+        },
+        { status: 401 },
+      );
     }
+
+    resetLoginRateLimit(keyRateLimitKey);
 
     // Generate new key distinct from current key
     let newKey = generateDeviceKey();

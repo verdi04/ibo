@@ -1,61 +1,84 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { authenticatePortalRequest } from '@/lib/portal-auth';
+import { verifyAdminRequest } from '@/lib/portal-auth';
 import { normalizeMac } from '@/lib/iptv-crypto';
 import { calculateDeviceStatus } from '@/lib/device-status';
 
+const MAX_MONTHS_PER_REQUEST = 60;
+const MAX_DAYS_PER_REQUEST = 1825;
+
+/**
+ * POST /api/admin/activate
+ * Grants subscription time. Requires a seller session: holding a device key proves ownership
+ * of the device, not that anyone paid for it.
+ */
 export async function POST(request) {
   try {
+    if (!verifyAdminRequest(request)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'التفعيل حق حصري لحساب البائع بعد تأكيد الدفع. مفتاح الجهاز وحده لا يمنح صلاحية الاشتراك.',
+        },
+        { status: 403 },
+      );
+    }
+
     let body = {};
     try {
       body = await request.json();
     } catch {
-      // Body may be empty if called with only auth headers
+      return NextResponse.json(
+        { success: false, error: 'صيغة البيانات غير صحيحة، يرجى إرسال JSON صالح.' },
+        { status: 400 },
+      );
     }
 
-    let device = await authenticatePortalRequest(request);
+    const targetMac = normalizeMac(body.mac_address);
+    const targetId =
+      Number.isInteger(body.device_id) && body.device_id > 0 ? body.device_id : null;
 
-    // If not authenticated via token/headers, try credentials in body
-    if (!device && body && body.mac_address && body.device_key) {
-      const normalizedMac = normalizeMac(body.mac_address);
-      if (normalizedMac) {
-        const { data: found } = await supabase
-          .from('devices')
-          .select('*')
-          .eq('mac_address', normalizedMac)
-          .eq('device_key', String(body.device_key).trim())
-          .maybeSingle();
+    if (!targetMac && !targetId) {
+      return NextResponse.json(
+        { success: false, error: 'حدد الجهاز المطلوب بتسجيل mac_address أو device_id.' },
+        { status: 400 },
+      );
+    }
 
-        if (found) {
-          device = found;
-        }
-      }
+    let lookup = supabase.from('devices').select('*');
+    lookup = targetMac ? lookup.eq('mac_address', targetMac) : lookup.eq('id', targetId);
+
+    const { data: device, error: selectError } = await lookup.maybeSingle();
+
+    if (selectError) {
+      console.error('Database error finding device to activate:', selectError);
+      return NextResponse.json(
+        { success: false, error: 'حدث خطأ أثناء البحث عن الجهاز.' },
+        { status: 500 },
+      );
     }
 
     if (!device) {
       return NextResponse.json(
-        {
-          success: false,
-          error: 'غير مصرح، يرجى تسجيل الدخول أو إرسال عنوان MAC ومفتاح الجهاز الصحيحين.',
-        },
-        { status: 401 },
+        { success: false, error: 'الجهاز غير مسجل في النظام.' },
+        { status: 404 },
       );
     }
 
     const now = new Date();
 
-    // Determine duration to extend: default 12 months (1 year)
     let monthsToAdd = 12;
     if (typeof body.months === 'number' && body.months > 0) {
-      monthsToAdd = Math.min(60, Math.floor(body.months)); // max 5 years at once
+      monthsToAdd = Math.min(MAX_MONTHS_PER_REQUEST, Math.floor(body.months));
     }
 
     let daysToAdd = null;
     if (typeof body.days === 'number' && body.days > 0) {
-      daysToAdd = Math.min(1825, Math.floor(body.days));
+      daysToAdd = Math.min(MAX_DAYS_PER_REQUEST, Math.floor(body.days));
     }
 
-    // Determine baseline date: if device already has active license in the future, extend from it
+    // Extend from the current expiry when the device still has time left
     let baseDate = now;
     if (device.license_expires_at) {
       const currentLicenseExp = new Date(device.license_expires_at);
@@ -73,7 +96,6 @@ export async function POST(request) {
 
     const newExpiresIso = newExpiresDate.toISOString();
 
-    // Update device record in database
     const { data: updatedDevice, error: updateError } = await supabase
       .from('devices')
       .update({
@@ -98,17 +120,10 @@ export async function POST(request) {
     return NextResponse.json({
       success: true,
       message: 'تم تفعيل الجهاز وتمديد الاشتراك بنجاح.',
+      mac_address: updatedDevice.mac_address,
       status: currentStatus.status,
       license_expires_at: updatedDevice.license_expires_at,
       days_remaining: currentStatus.days_remaining,
-      device: {
-        id: updatedDevice.id,
-        mac_address: updatedDevice.mac_address,
-        device_key: updatedDevice.device_key,
-        status: currentStatus.status,
-        license_expires_at: updatedDevice.license_expires_at,
-        days_remaining: currentStatus.days_remaining,
-      },
     });
   } catch (error) {
     console.error('Unhandled error activating device:', error);

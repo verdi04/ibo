@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import { normalizeMac } from '@/lib/iptv-crypto';
+import { normalizeMac, safeEquals } from '@/lib/iptv-crypto';
 import { calculateDeviceStatus } from '@/lib/device-status';
 import {
   getClientIp,
@@ -96,7 +96,7 @@ export async function POST(request) {
     }
 
     // Verify existence and device_key
-    if (!device || device.device_key !== cleanKey) {
+    if (!device || !safeEquals(cleanKey, device.device_key)) {
       recordFailedLogin(rateLimitIdentifier, 15 * 60 * 1000);
       return NextResponse.json(
         {

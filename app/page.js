@@ -10,7 +10,7 @@ export default function IboPortal() {
       const stored = sessionStorage.getItem('iptv_portal_session');
       if (stored) {
         const parsed = JSON.parse(stored);
-        if (parsed.token && parsed.device) {
+        if (parsed.token && (parsed.device || parsed.admin)) {
           setSession(parsed);
         } else {
           sessionStorage.removeItem('iptv_portal_session');
@@ -32,10 +32,15 @@ export default function IboPortal() {
   const [playlists, setPlaylists] = useState([]);
   const [loadingPlaylists, setLoadingPlaylists] = useState(false);
 
+  // Seller panel state: the only principal allowed to grant subscription time
+  const [loginMode, setLoginMode] = useState('device'); // 'device' | 'admin'
+  const [adminPassword, setAdminPassword] = useState('');
+  const [adminMac, setAdminMac] = useState('');
+  const [adminTarget, setAdminTarget] = useState(null);
+
   // Modals state
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingPlaylist, setEditingPlaylist] = useState(null);
-  const [showActivateModal, setShowActivateModal] = useState(false);
   const [playlistType, setPlaylistType] = useState('m3u'); // 'm3u' | 'xtream'
 
   // Playlist Form State
@@ -44,19 +49,22 @@ export default function IboPortal() {
   const [plUsername, setPlUsername] = useState('');
   const [plPassword, setPlPassword] = useState('');
 
-  // Load playlists whenever session token changes
+  // Load playlists whenever a device session token changes
   useEffect(() => {
-    if (session?.token) {
+    if (session?.token && session?.device) {
       loadPlaylists(session.token);
     }
-  }, [session?.token]);
+  }, [session?.token, session?.device]);
 
   // Format MAC address input automatically
-  function handleMacChange(e) {
-    const raw = e.target.value.toUpperCase().replace(/[^0-9A-F]/g, '');
-    const clean = raw.slice(0, 12);
+  function formatMac(raw) {
+    const clean = raw.toUpperCase().replace(/[^0-9A-F]/g, '').slice(0, 12);
     const parts = clean.match(/.{1,2}/g);
-    setMacAddress(parts ? parts.join(':') : clean);
+    return parts ? parts.join(':') : clean;
+  }
+
+  function handleMacChange(e) {
+    setMacAddress(formatMac(e.target.value));
   }
 
   // Handle Login
@@ -104,6 +112,8 @@ export default function IboPortal() {
     sessionStorage.removeItem('iptv_portal_session');
     setSession(null);
     setPlaylists([]);
+    setAdminTarget(null);
+    setAdminPassword('');
     setErrorMessage('');
     setSuccessMessage('تم تسجيل الخروج بنجاح.');
   }
@@ -176,21 +186,80 @@ export default function IboPortal() {
     }
   }
 
-  // Activate / Extend Device Subscription
-  async function handleActivate(months = 12) {
-    if (!session) return;
+  // Seller sign-in: the only session allowed to grant subscription time
+  async function handleAdminLogin(e) {
+    e.preventDefault();
+    setErrorMessage('');
+    setSuccessMessage('');
+    setLoading(true);
+
+    try {
+      const res = await fetch('/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: adminPassword }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setErrorMessage(data.error || 'فشل تسجيل دخول البائع.');
+        return;
+      }
+
+      const newSession = { token: data.token, admin: true };
+      setSession(newSession);
+      sessionStorage.setItem('iptv_portal_session', JSON.stringify(newSession));
+      setSuccessMessage('تم تسجيل دخول البائع بنجاح!');
+    } catch (err) {
+      setErrorMessage(`تعذر الاتصال بالخادم: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleAdminLookup(e) {
+    e.preventDefault();
+    if (!session?.admin) return;
     setLoading(true);
     setErrorMessage('');
     setSuccessMessage('');
 
     try {
-      const res = await fetch('/api/portal/activate', {
+      const res = await fetch(`/api/admin/device?mac=${encodeURIComponent(adminMac)}`, {
+        headers: { Authorization: `Bearer ${session.token}` },
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        setAdminTarget(null);
+        setErrorMessage(data.error || 'تعذر جلب بيانات الجهاز.');
+        return;
+      }
+
+      setAdminTarget(data.device);
+    } catch (err) {
+      setAdminTarget(null);
+      setErrorMessage(`حدث خطأ أثناء جلب بيانات الجهاز: ${err.message}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Extend the looked-up device's subscription
+  async function handleActivate(months) {
+    if (!session?.admin || !adminTarget) return;
+    setLoading(true);
+    setErrorMessage('');
+    setSuccessMessage('');
+
+    try {
+      const res = await fetch('/api/admin/activate', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${session.token}`,
         },
-        body: JSON.stringify({ months }),
+        body: JSON.stringify({ mac_address: adminTarget.mac_address, months }),
       });
 
       const data = await res.json();
@@ -199,20 +268,16 @@ export default function IboPortal() {
         return;
       }
 
-      const updatedSession = {
-        ...session,
-        device: {
-          ...session.device,
-          status: data.status,
-          license_expires_at: data.license_expires_at,
-          days_remaining: data.days_remaining,
-        },
-      };
-
-      setSession(updatedSession);
-      sessionStorage.setItem('iptv_portal_session', JSON.stringify(updatedSession));
-      setShowActivateModal(false);
-      setSuccessMessage(`تم تفعيل الجهاز بنجاح! الصلاحية الجديدة: ${data.days_remaining} يوم`);
+      setAdminTarget((prev) => ({
+        ...prev,
+        status: data.status,
+        license_expires_at: data.license_expires_at,
+        days_remaining: data.days_remaining,
+        is_valid: true,
+      }));
+      setSuccessMessage(
+        `تم تمديد اشتراك ${data.mac_address}! الصلاحية الجديدة: ${data.days_remaining} يوم`
+      );
     } catch (err) {
       setErrorMessage(`حدث خطأ أثناء تفعيل الجهاز: ${err.message}`);
     } finally {
@@ -460,7 +525,7 @@ export default function IboPortal() {
                 borderRadius: 20,
               }}
             >
-              الماك: {session.device.mac_address}
+              {session.admin ? 'حساب البائع' : `الماك: ${session.device.mac_address}`}
             </span>
             <button
               onClick={handleLogout}
@@ -553,16 +618,85 @@ export default function IboPortal() {
                 padding: '32px 28px',
               }}
             >
+            <div style={{ display: 'flex', gap: 8, marginBottom: 22, background: '#f1f5f9', borderRadius: 12, padding: 4 }}>
+              {[
+                { id: 'device', label: 'دخول الجهاز' },
+                { id: 'admin', label: 'دخول البائع' },
+              ].map((mode) => (
+                <button
+                  key={mode.id}
+                  type="button"
+                  onClick={() => {
+                    setLoginMode(mode.id);
+                    setErrorMessage('');
+                    setSuccessMessage('');
+                  }}
+                  style={{
+                    flex: 1,
+                    padding: '9px 12px',
+                    borderRadius: 9,
+                    border: 'none',
+                    fontSize: 14,
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    background: loginMode === mode.id ? '#ffffff' : 'transparent',
+                    color: loginMode === mode.id ? '#0f172a' : '#64748b',
+                  }}
+                >
+                  {mode.label}
+                </button>
+              ))}
+            </div>
+
             <div className="login-heading" style={{ textAlign: 'center', marginBottom: 28 }}>
-              <span className="login-eyebrow">مرحباً بعودتك</span>
+              <span className="login-eyebrow">
+                {loginMode === 'admin' ? 'صلاحيات البائع' : 'مرحباً بعودتك'}
+              </span>
               <h2 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: '#0f172a' }}>
-                سجّل دخول جهازك
+                {loginMode === 'admin' ? 'تسجيل دخول البائع' : 'سجّل دخول جهازك'}
               </h2>
               <p style={{ margin: '8px 0 0', fontSize: 14, color: '#64748b' }}>
-                أدخل بيانات الجهاز الظاهرة على شاشة التلفاز للمتابعة
+                {loginMode === 'admin'
+                  ? 'من هذه اللوحة فقط يمكن منح الاشتراكات أو تمديدها بعد تأكيد الدفع'
+                  : 'أدخل بيانات الجهاز الظاهرة على شاشة التلفاز للمتابعة'}
               </p>
             </div>
 
+            {loginMode === 'admin' ? (
+              <form onSubmit={handleAdminLogin} style={{ display: 'grid', gap: 20 }}>
+                <div>
+                  <label htmlFor="admin-password" style={{ display: 'block', marginBottom: 8, fontSize: 14, fontWeight: 600 }}>
+                    كلمة مرور البائع <span style={{ color: '#ef4444' }}>*</span>
+                  </label>
+                  <input
+                    type="password"
+                    id="admin-password"
+                    required
+                    placeholder="••••••••"
+                    value={adminPassword}
+                    onChange={(e) => setAdminPassword(e.target.value)}
+                    style={inputStyle}
+                    autoComplete="off"
+                    dir="ltr"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  style={{
+                    ...btnPrimary,
+                    width: '100%',
+                    minHeight: 48,
+                    marginTop: 8,
+                    opacity: loading ? 0.7 : 1,
+                    cursor: loading ? 'wait' : 'pointer',
+                  }}
+                >
+                  {loading ? 'جارٍ التحقق…' : 'دخول لوحة البائع'}
+                </button>
+              </form>
+            ) : (
             <form onSubmit={handleLogin} style={{ display: 'grid', gap: 20 }}>
               <div>
                 <label htmlFor="mac-address" style={{ display: 'block', marginBottom: 8, fontSize: 14, fontWeight: 600 }}>
@@ -614,6 +748,7 @@ export default function IboPortal() {
                 {loading ? 'جارٍ التحقق من الجهاز…' : 'دخول آمن إلى حسابك'}
               </button>
             </form>
+            )}
 
             <div
               className="login-security"
@@ -660,6 +795,144 @@ export default function IboPortal() {
             </div>
           </aside>
         </div>
+        ) : session.admin ? (
+          /* View 2: Seller panel - the only place subscription time can be granted */
+          <div
+            style={{
+              background: '#ffffff',
+              borderRadius: 16,
+              border: '1px solid #e2e8f0',
+              padding: '24px 28px',
+              boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.05)',
+            }}
+          >
+            <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>لوحة البائع</h2>
+            <p style={{ margin: '8px 0 20px', fontSize: 14, color: '#64748b' }}>
+              ابحث بجهاز العميل ثم اختر مدة التمديد بعد تأكيد الدفعة. مفتاح الجهاز لا يمنح اشتراكًا.
+            </p>
+
+            <form
+              onSubmit={handleAdminLookup}
+              style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}
+            >
+              <input
+                type="text"
+                required
+                aria-label="عنوان MAC للجهاز"
+                placeholder="00:1A:2B:3C:4D:5E"
+                value={adminMac}
+                onChange={(e) => setAdminMac(formatMac(e.target.value))}
+                style={{ ...inputStyle, maxWidth: 260, fontFamily: 'monospace' }}
+                dir="ltr"
+              />
+              <button
+                type="submit"
+                disabled={loading}
+                style={{ ...btnPrimary, opacity: loading ? 0.7 : 1 }}
+              >
+                {loading ? 'جارٍ البحث…' : 'بحث عن الجهاز'}
+              </button>
+            </form>
+
+            {adminTarget && (
+              <div
+                style={{
+                  marginTop: 20,
+                  border: '1px solid #e2e8f0',
+                  borderRadius: 12,
+                  overflow: 'hidden',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
+                    gap: 14,
+                    padding: 18,
+                    background: '#f8fafc',
+                  }}
+                >
+                  <div>
+                    <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>MAC</div>
+                    <div style={{ fontSize: 15, fontWeight: 700, fontFamily: 'monospace' }} dir="ltr">
+                      {adminTarget.mac_address}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>الحالة</div>
+                    {(() => {
+                      const badge = getStatusBadge(adminTarget.status);
+                      return (
+                        <span
+                          style={{
+                            display: 'inline-block',
+                            background: badge.bg,
+                            color: badge.color,
+                            padding: '4px 10px',
+                            borderRadius: 20,
+                            fontSize: 13,
+                            fontWeight: 700,
+                          }}
+                        >
+                          {badge.text}
+                        </span>
+                      );
+                    })()}
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>الأيام المتبقية</div>
+                    <div style={{ fontSize: 18, fontWeight: 700, color: adminTarget.days_remaining > 0 ? '#10b981' : '#ef4444' }}>
+                      {adminTarget.days_remaining || 0} يوم
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>انتهاء الترخيص</div>
+                    <div style={{ fontSize: 15, fontWeight: 700 }}>
+                      {adminTarget.license_expires_at ? adminTarget.license_expires_at.slice(0, 10) : '—'}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>القوائم النشطة</div>
+                    <div style={{ fontSize: 15, fontWeight: 700 }}>
+                      {adminTarget.playlists_active} / {adminTarget.playlists_total}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 12, color: '#64748b', marginBottom: 4 }}>آخر ظهور للجهاز</div>
+                    <div style={{ fontSize: 15, fontWeight: 700 }}>
+                      {adminTarget.last_seen_at ? adminTarget.last_seen_at.slice(0, 10) : '—'}
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: 10,
+                    flexWrap: 'wrap',
+                    padding: 16,
+                    borderTop: '1px solid #e2e8f0',
+                  }}
+                >
+                  {[12, 6, 3, 1].map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => handleActivate(m)}
+                      disabled={loading}
+                      style={{
+                        ...(m === 12 ? btnPrimary : { ...btnPrimary, background: '#f1f5f9', color: '#1e293b', border: '1px solid #cbd5e1' }),
+                        padding: '10px 16px',
+                        fontSize: 14,
+                        opacity: loading ? 0.7 : 1,
+                      }}
+                    >
+                      تمديد {m} {m === 1 ? 'شهرًا' : 'أشهرًا'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         ) : (
           /* View 2: Authenticated Dashboard */
           <div className="portal-dashboard">
@@ -716,22 +989,6 @@ export default function IboPortal() {
 
                 {/* Quick Action Buttons */}
                 <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                  <button
-                    onClick={() => setShowActivateModal(true)}
-                    style={{
-                      background: '#10b981',
-                      color: '#ffffff',
-                      border: 'none',
-                      padding: '9px 16px',
-                      borderRadius: 10,
-                      fontSize: 14,
-                      fontWeight: 600,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    ⭐ تفعيل / تمديد الاشتراك
-                  </button>
-
                   <button
                     onClick={handleChangeKey}
                     style={{
@@ -1161,92 +1418,6 @@ export default function IboPortal() {
           </div>
         )}
 
-        {/* Modal: Activate / Extend Subscription */}
-        {showActivateModal && (
-          <div
-            style={{
-              position: 'fixed',
-              top: 0,
-              left: 0,
-              right: 0,
-              bottom: 0,
-              background: 'rgba(0,0,0,0.5)',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              zIndex: 100,
-              padding: 16,
-            }}
-          >
-            <div
-              style={{
-                background: '#ffffff',
-                borderRadius: 16,
-                maxWidth: 440,
-                width: '100%',
-                padding: '28px 24px',
-                textAlign: 'center',
-              }}
-            >
-              <div style={{ fontSize: 40, marginBottom: 12 }}>⭐</div>
-              <h3 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>
-                تفعيل الجهاز وتمديد الصلاحية
-              </h3>
-              <p style={{ margin: '8px 0 20px', fontSize: 14, color: '#64748b' }}>
-                اختر المدة المراد تمديد تفعيل هذا الجهاز بها:
-              </p>
-
-              <div style={{ display: 'grid', gap: 10, marginBottom: 20 }}>
-                <button
-                  onClick={() => handleActivate(12)}
-                  disabled={loading}
-                  style={{
-                    background: '#2563eb',
-                    color: '#ffffff',
-                    border: 'none',
-                    padding: '14px',
-                    borderRadius: 10,
-                    fontSize: 15,
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                  }}
-                >
-                  تمديد لمدة 1 سنة (12 شهراً)
-                </button>
-
-                <button
-                  onClick={() => handleActivate(6)}
-                  disabled={loading}
-                  style={{
-                    background: '#f1f5f9',
-                    color: '#1e293b',
-                    border: '1px solid #cbd5e1',
-                    padding: '12px',
-                    borderRadius: 10,
-                    fontSize: 14,
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                  }}
-                >
-                  تمديد لمدة 6 أشهر
-                </button>
-              </div>
-
-              <button
-                onClick={() => setShowActivateModal(false)}
-                style={{
-                  background: 'transparent',
-                  border: 'none',
-                  color: '#64748b',
-                  fontSize: 14,
-                  cursor: 'pointer',
-                }}
-              >
-                إغلاق
-              </button>
-            </div>
-          </div>
-        )}
       </main>
       <footer className="portal-footer">
         <span>IPTV Portal</span>

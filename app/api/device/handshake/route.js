@@ -7,11 +7,15 @@ import {
   decryptPassword,
   deriveEcdhSessionKey,
   signHandshakeResponse,
+  safeEquals,
 } from '@/lib/iptv-crypto';
 import { calculateDeviceStatus } from '@/lib/device-status';
 import {
   getClientIp,
   checkEndpointRateLimit,
+  checkLoginRateLimit,
+  recordFailedLogin,
+  resetLoginRateLimit,
 } from '@/lib/rate-limiter';
 
 export async function POST(request) {
@@ -51,7 +55,7 @@ export async function POST(request) {
       );
     }
 
-    const { mac_address, device_type } = body;
+    const { mac_address, device_type, device_key } = body;
 
     const normalizedMac = normalizeMac(mac_address);
     if (!normalizedMac) {
@@ -70,6 +74,27 @@ export async function POST(request) {
         ? device_type.trim().slice(0, 50)
         : 'Android TV';
 
+    // The device key is the only bearer secret the device holds, so guessing it must be
+    // as expensive here as it is at portal login.
+    const keyRateLimitKey = `handshake:${clientIp}:${normalizedMac}`;
+    const keyAttemptCheck = checkLoginRateLimit(keyRateLimitKey, 5, 15 * 60 * 1000);
+    if (!keyAttemptCheck.allowed) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'تم حظر المحاولات مؤقتاً بسبب تكرار إدخال بيانات خاطئة. يرجى المحاولة بعد 15 دقيقة.',
+          retry_after: keyAttemptCheck.retryAfterSeconds,
+        },
+        {
+          status: 429,
+          headers: {
+            'Retry-After': String(keyAttemptCheck.retryAfterSeconds),
+          },
+        },
+      );
+    }
+
     const now = new Date();
 
     // Check if device is already registered
@@ -85,6 +110,27 @@ export async function POST(request) {
         { success: false, error: 'حدث خطأ أثناء فحص بيانات الجهاز.' },
         { status: 500 },
       );
+    }
+
+    // Proof of possession: a registered device must present its key before the server
+    // discloses status, the key itself, or any playlist credentials.
+    if (existingDevice) {
+      const claimedKey =
+        typeof device_key === 'string' ? device_key.trim() : '';
+
+      if (!claimedKey || !safeEquals(claimedKey, existingDevice.device_key)) {
+        recordFailedLogin(keyRateLimitKey, 15 * 60 * 1000);
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              'مفتاح الجهاز غير صحيح أو مفقود. إذا أعدت تثبيت التطبيق فيجب تجديد المفتاح من البوابة ثم إعادة التفعيل.',
+          },
+          { status: 401 },
+        );
+      }
+
+      resetLoginRateLimit(keyRateLimitKey);
     }
 
     let device = existingDevice;
