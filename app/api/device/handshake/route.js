@@ -17,6 +17,7 @@ import {
   recordFailedLogin,
   resetLoginRateLimit,
 } from '@/lib/rate-limiter';
+import { normalizeAndMigratePlaylistRow } from '@/lib/xtream-parser';
 
 export async function POST(request) {
   try {
@@ -270,13 +271,16 @@ export async function POST(request) {
         if (playlistError) {
           console.error('Database error fetching playlists:', playlistError);
         } else if (dbPlaylists) {
-          playlists = dbPlaylists.map((p) => ({
+          const normalizedRows = await Promise.all(
+            dbPlaylists.map((p) => normalizeAndMigratePlaylistRow(supabase, p)),
+          );
+          playlists = normalizedRows.map((p) => ({
             id: p.id,
             name: p.name,
             type: p.type,
             url: p.url,
-            username: p.username || null,
-            password: p.password ? decryptPassword(p.password) : null,
+            username: p.username,
+            password: p.password,
             is_active: p.is_active,
             created_at: p.created_at,
           }));

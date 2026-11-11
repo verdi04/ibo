@@ -2,6 +2,10 @@ import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { authenticatePortalRequest } from '@/lib/portal-auth';
 import { encryptPassword, decryptPassword } from '@/lib/iptv-crypto';
+import {
+  resolveAndParsePlaylistInput,
+  normalizeAndMigratePlaylistRow,
+} from '@/lib/xtream-parser';
 
 /**
  * GET /api/portal/playlists
@@ -40,18 +44,9 @@ export async function GET(request) {
       );
     }
 
-    const formatted = (playlists || []).map((p) => ({
-      id: p.id,
-      device_id: p.device_id,
-      name: p.name,
-      type: p.type,
-      url: p.url,
-      username: p.username || null,
-      password: p.password ? decryptPassword(p.password) : null,
-      is_active: p.is_active,
-      created_at: p.created_at,
-      updated_at: p.updated_at,
-    }));
+    const formatted = await Promise.all(
+      (playlists || []).map((p) => normalizeAndMigratePlaylistRow(supabase, p)),
+    );
 
     return NextResponse.json({
       success: true,
@@ -69,7 +64,9 @@ export async function GET(request) {
 
 /**
  * POST /api/portal/playlists
- * Adds a new playlist (M3U or Xtream) for the authenticated device
+ * Adds a new playlist for the authenticated device.
+ * Server extracts Xtream credentials if present and stores as 'xtream' in DB;
+ * otherwise stores as direct 'm3u' link in DB.
  */
 export async function POST(request) {
   try {
@@ -93,7 +90,6 @@ export async function POST(request) {
 
     const { name, type, url, username, password } = body;
 
-    // Validate name
     if (typeof name !== 'string' || !name.trim()) {
       return NextResponse.json(
         { success: false, error: 'اسم الباقة name مطلوب.' },
@@ -101,8 +97,7 @@ export async function POST(request) {
       );
     }
 
-    // Validate type ('m3u' | 'xtream')
-    const cleanType = String(type || '').trim().toLowerCase();
+    const cleanType = String(type || 'm3u').trim().toLowerCase();
     if (cleanType !== 'm3u' && cleanType !== 'xtream') {
       return NextResponse.json(
         {
@@ -113,7 +108,6 @@ export async function POST(request) {
       );
     }
 
-    // Validate URL
     if (typeof url !== 'string' || !url.trim()) {
       return NextResponse.json(
         { success: false, error: 'رابط القائمة url مطلوب.' },
@@ -122,7 +116,7 @@ export async function POST(request) {
     }
 
     const cleanUrl = url.trim();
-    if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://')) {
+    if (!/^https?:\/\//i.test(cleanUrl)) {
       return NextResponse.json(
         {
           success: false,
@@ -132,41 +126,30 @@ export async function POST(request) {
       );
     }
 
-    // Xtream specific validation
-    let cleanUsername = null;
-    let encryptedPassword = null;
+    // Extract Xtream credentials on the server (including shortened URLs)
+    const parsed = await resolveAndParsePlaylistInput({
+      url: cleanUrl,
+      username: cleanType === 'xtream' ? username : null,
+      password: cleanType === 'xtream' ? password : null,
+    });
 
-    if (cleanType === 'xtream') {
-      if (typeof username !== 'string' || !username.trim()) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: 'اسم المستخدم مطلوب لحسابات إكستريم (Xtream).',
-          },
-          { status: 400 },
-        );
-      }
-      if (typeof password !== 'string' || !password.trim()) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: 'كلمة المرور مطلوبة لحسابات إكستريم (Xtream).',
-          },
-          { status: 400 },
-        );
-      }
-
-      cleanUsername = username.trim();
-      encryptedPassword = encryptPassword(password.trim());
+    if (cleanType === 'xtream' && !parsed.isXtream) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'اسم المستخدم وكلمة المرور مطلوبان لحسابات إكستريم (Xtream).',
+        },
+        { status: 400 },
+      );
     }
 
     const newRecord = {
       device_id: device.id,
       name: name.trim().slice(0, 100),
-      type: cleanType,
-      url: cleanUrl,
-      username: cleanUsername,
-      password: encryptedPassword,
+      type: parsed.isXtream ? 'xtream' : 'm3u',
+      url: parsed.url,
+      username: parsed.isXtream ? parsed.username : null,
+      password: parsed.isXtream ? encryptPassword(parsed.password) : null,
       is_active: true,
     };
 
@@ -209,7 +192,7 @@ export async function POST(request) {
 
 /**
  * PUT /api/portal/playlists
- * Updates an existing playlist
+ * Updates an existing playlist and persists the resolved type ('xtream' or 'm3u') in DB.
  */
 export async function PUT(request) {
   try {
@@ -240,7 +223,6 @@ export async function PUT(request) {
       );
     }
 
-    // Verify ownership
     const { data: existing, error: findError } = await supabase
       .from('playlists')
       .select('*')
@@ -259,37 +241,59 @@ export async function PUT(request) {
       updated_at: new Date().toISOString(),
     };
 
-    if (name && typeof name === 'string') {
+    if (name && typeof name === 'string' && name.trim()) {
       updateFields.name = name.trim().slice(0, 100);
-    }
-
-    if (type && typeof type === 'string') {
-      const cleanType = type.trim().toLowerCase();
-      if (cleanType === 'm3u' || cleanType === 'xtream') {
-        updateFields.type = cleanType;
-      }
-    }
-
-    if (url && typeof url === 'string') {
-      const cleanUrl = url.trim();
-      if (cleanUrl.startsWith('http://') || cleanUrl.startsWith('https://')) {
-        updateFields.url = cleanUrl;
-      }
-    }
-
-    if (username !== undefined) {
-      updateFields.username =
-        typeof username === 'string' && username.trim()
-          ? username.trim()
-          : null;
-    }
-
-    if (password !== undefined && password !== null && password !== '') {
-      updateFields.password = encryptPassword(String(password).trim());
     }
 
     if (typeof is_active === 'boolean') {
       updateFields.is_active = is_active;
+    }
+
+    const isUpdatingConnection =
+      url !== undefined || type !== undefined || username !== undefined || password !== undefined;
+
+    if (isUpdatingConnection) {
+      const requestedType =
+        typeof type === 'string' && type.trim()
+          ? type.trim().toLowerCase()
+          : existing.type;
+      const candidateUrl =
+        typeof url === 'string' && url.trim() ? url.trim() : existing.url;
+      const existingPlainPass = existing.password ? decryptPassword(existing.password) : null;
+
+      const candidateUser =
+        requestedType === 'm3u'
+          ? null
+          : username !== undefined
+            ? username
+            : existing.username;
+      const candidatePass =
+        requestedType === 'm3u'
+          ? null
+          : password !== undefined && password !== null && password !== ''
+            ? password
+            : existingPlainPass;
+
+      const parsed = await resolveAndParsePlaylistInput({
+        url: candidateUrl,
+        username: candidateUser,
+        password: candidatePass,
+      });
+
+      if (requestedType === 'xtream' && !parsed.isXtream) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'اسم المستخدم وكلمة المرور مطلوبان لحسابات إكستريم (Xtream).',
+          },
+          { status: 400 },
+        );
+      }
+
+      updateFields.type = parsed.isXtream ? 'xtream' : 'm3u';
+      updateFields.url = parsed.url;
+      updateFields.username = parsed.isXtream ? parsed.username : null;
+      updateFields.password = parsed.isXtream ? encryptPassword(parsed.password) : null;
     }
 
     const { data: updated, error: updateError } = await supabase
@@ -368,7 +372,6 @@ export async function DELETE(request) {
       );
     }
 
-    // Delete with ownership check
     const { error: deleteError } = await supabase
       .from('playlists')
       .delete()

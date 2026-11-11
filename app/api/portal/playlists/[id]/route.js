@@ -1,7 +1,8 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
 import { authenticatePortalRequest } from '@/lib/portal-auth';
-import { encryptPassword } from '@/lib/iptv-crypto';
+import { encryptPassword, decryptPassword } from '@/lib/iptv-crypto';
+import { resolveAndParsePlaylistInput } from '@/lib/xtream-parser';
 
 export async function PUT(request, { params }) {
   try {
@@ -32,43 +33,79 @@ export async function PUT(request, { params }) {
       );
     }
 
+    const { data: existing, error: findError } = await supabase
+      .from('playlists')
+      .select('*')
+      .eq('id', id)
+      .eq('device_id', device.id)
+      .maybeSingle();
+
+    if (findError || !existing) {
+      return NextResponse.json(
+        { success: false, error: 'القائمة غير موجودة أو لا تنتمي لهذا الجهاز.' },
+        { status: 404 },
+      );
+    }
+
     const { name, type, url, username, password, is_active } = body;
 
     const updateFields = {
       updated_at: new Date().toISOString(),
     };
 
-    if (name && typeof name === 'string') {
+    if (name && typeof name === 'string' && name.trim()) {
       updateFields.name = name.trim().slice(0, 100);
-    }
-
-    if (type && typeof type === 'string') {
-      const cleanType = type.trim().toLowerCase();
-      if (cleanType === 'm3u' || cleanType === 'xtream') {
-        updateFields.type = cleanType;
-      }
-    }
-
-    if (url && typeof url === 'string') {
-      const cleanUrl = url.trim();
-      if (cleanUrl.startsWith('http://') || cleanUrl.startsWith('https://')) {
-        updateFields.url = cleanUrl;
-      }
-    }
-
-    if (username !== undefined) {
-      updateFields.username =
-        typeof username === 'string' && username.trim()
-          ? username.trim()
-          : null;
-    }
-
-    if (password !== undefined && password !== null && password !== '') {
-      updateFields.password = encryptPassword(String(password).trim());
     }
 
     if (typeof is_active === 'boolean') {
       updateFields.is_active = is_active;
+    }
+
+    const isUpdatingConnection =
+      url !== undefined || type !== undefined || username !== undefined || password !== undefined;
+
+    if (isUpdatingConnection) {
+      const requestedType =
+        typeof type === 'string' && type.trim()
+          ? type.trim().toLowerCase()
+          : existing.type;
+      const candidateUrl =
+        typeof url === 'string' && url.trim() ? url.trim() : existing.url;
+      const existingPlainPass = existing.password ? decryptPassword(existing.password) : null;
+
+      const candidateUser =
+        requestedType === 'm3u'
+          ? null
+          : username !== undefined
+            ? username
+            : existing.username;
+      const candidatePass =
+        requestedType === 'm3u'
+          ? null
+          : password !== undefined && password !== null && password !== ''
+            ? password
+            : existingPlainPass;
+
+      const parsed = await resolveAndParsePlaylistInput({
+        url: candidateUrl,
+        username: candidateUser,
+        password: candidatePass,
+      });
+
+      if (requestedType === 'xtream' && !parsed.isXtream) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'اسم المستخدم وكلمة المرور مطلوبان لحسابات إكستريم (Xtream).',
+          },
+          { status: 400 },
+        );
+      }
+
+      updateFields.type = parsed.isXtream ? 'xtream' : 'm3u';
+      updateFields.url = parsed.url;
+      updateFields.username = parsed.isXtream ? parsed.username : null;
+      updateFields.password = parsed.isXtream ? encryptPassword(parsed.password) : null;
     }
 
     const { data: updated, error: updateError } = await supabase
@@ -134,7 +171,6 @@ export async function DELETE(request, { params }) {
       .eq('device_id', device.id);
 
     if (deleteError) {
-      console.error('Database error in DELETE playlist [id]:', deleteError);
       return NextResponse.json(
         { success: false, error: 'تعذر حذف القائمة.' },
         { status: 500 },
@@ -146,7 +182,7 @@ export async function DELETE(request, { params }) {
       message: 'تم حذف القائمة بنجاح.',
     });
   } catch (error) {
-    console.error('Unhandled error in DELETE playlist [id]:', error);
+    console.error('Unhandled error in delete playlist [id]:', error);
     return NextResponse.json(
       { success: false, error: 'حدث خطأ أثناء حذف القائمة.' },
       { status: 500 },
