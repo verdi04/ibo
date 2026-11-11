@@ -4,8 +4,11 @@ import {
   normalizeMac,
   generateDeviceKey,
   encryptPayload,
+  deriveEcdhSessionKey,
+  signHandshakeResponse,
   safeEquals,
 } from '@/lib/iptv-crypto';
+import { createPortalToken } from '@/lib/portal-auth';
 import {
   getClientIp,
   checkEndpointRateLimit,
@@ -66,19 +69,26 @@ export async function POST(request) {
     }
 
     const keyRateLimitKey = `change_key:${clientIp}:${normalizedMac}`;
+    const macLockKey = `mac_lock:${normalizedMac}`;
     const keyAttemptCheck = checkLoginRateLimit(keyRateLimitKey, 5, 15 * 60 * 1000);
-    if (!keyAttemptCheck.allowed) {
+    const macAttemptCheck = checkLoginRateLimit(macLockKey, 10, 15 * 60 * 1000);
+    if (!keyAttemptCheck.allowed || !macAttemptCheck.allowed) {
+      const retryAfter = Math.max(
+        keyAttemptCheck.retryAfterSeconds || 0,
+        macAttemptCheck.retryAfterSeconds || 0,
+        60,
+      );
       return NextResponse.json(
         {
           success: false,
           error:
             'تم حظر المحاولات مؤقتاً بسبب تكرار إدخال بيانات خاطئة. يرجى المحاولة بعد 15 دقيقة.',
-          retry_after: keyAttemptCheck.retryAfterSeconds,
+          retry_after: retryAfter,
         },
         {
           status: 429,
           headers: {
-            'Retry-After': String(keyAttemptCheck.retryAfterSeconds),
+            'Retry-After': String(retryAfter),
           },
         },
       );
@@ -114,6 +124,7 @@ export async function POST(request) {
       !safeEquals(providedKey.trim(), device.device_key)
     ) {
       recordFailedLogin(keyRateLimitKey, 15 * 60 * 1000);
+      recordFailedLogin(macLockKey, 15 * 60 * 1000);
       return NextResponse.json(
         {
           success: false,
@@ -124,6 +135,7 @@ export async function POST(request) {
     }
 
     resetLoginRateLimit(keyRateLimitKey);
+    resetLoginRateLimit(macLockKey);
 
     // Generate new key distinct from current key
     let newKey = generateDeviceKey();
@@ -131,11 +143,13 @@ export async function POST(request) {
       newKey = generateDeviceKey();
     }
 
+    const updatedAt = new Date().toISOString();
+
     const { error: updateError } = await supabase
       .from('devices')
       .update({
         device_key: newKey,
-        updated_at: new Date().toISOString(),
+        updated_at: updatedAt,
       })
       .eq('id', device.id);
 
@@ -151,31 +165,50 @@ export async function POST(request) {
       message: 'تم تجديد مفتاح الجهاز بنجاح',
       mac_address: normalizedMac,
       device_key: newKey,
-      updated_at: new Date().toISOString(),
+      updated_at: updatedAt,
     };
 
-    const url = new URL(request.url);
-    const allowPlain =
-      url.searchParams.get('plain') === 'true' ||
-      request.headers.get('x-plain-response') === 'true';
+    const clientPubKey =
+      typeof body.client_pubkey === 'string' ? body.client_pubkey.trim() : '';
 
-    const encryptedResult = encryptPayload(responsePayload);
+    if (clientPubKey) {
+      const { aesKey, serverPublicKey } = deriveEcdhSessionKey(
+        clientPubKey,
+        normalizedMac,
+      );
+      const pairEncrypted = encryptPayload(responsePayload, aesKey);
+      const { signature } = signHandshakeResponse({
+        mac: normalizedMac,
+        clientPublicKey: clientPubKey,
+        serverPublicKey,
+        combined: pairEncrypted.combined,
+      });
 
-    if (allowPlain) {
       return NextResponse.json({
         success: true,
-        encrypted: false,
-        payload: responsePayload,
-        encrypted_preview: encryptedResult.combined,
+        encrypted: true,
+        mode: 'pair',
+        server_pubkey: serverPublicKey,
+        payload: pairEncrypted.combined,
+        sig: signature,
       });
     }
 
+    // Issue a fresh portal session token bound to the new device_key; all previously
+    // issued tokens for this device become invalid immediately.
+    const newPortalToken = createPortalToken({
+      device_id: device.id,
+      mac_address: normalizedMac,
+      device_key: newKey,
+    });
+
     return NextResponse.json({
       success: true,
-      encrypted: true,
-      payload: encryptedResult.combined,
-      data: encryptedResult,
-      device_key: newKey, // Also provide clear new_key in top level for portal/client convenience
+      message: responsePayload.message,
+      mac_address: normalizedMac,
+      device_key: newKey,
+      token: newPortalToken,
+      updated_at: updatedAt,
     });
   } catch (error) {
     console.error('Unhandled error in device change-key:', error);

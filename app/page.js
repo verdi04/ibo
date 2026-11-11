@@ -197,9 +197,12 @@ export default function IboPortal() {
     setSuccessMessage('');
 
     try {
-      const res = await fetch('/api/device/change-key?plain=true', {
+      const res = await fetch('/api/device/change-key', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(session.token ? { Authorization: `Bearer ${session.token}` } : {}),
+        },
         body: JSON.stringify({
           mac_address: session.device.mac_address,
           current_key: session.device.device_key,
@@ -215,6 +218,7 @@ export default function IboPortal() {
       const newKey = data.device_key || data.payload?.device_key;
       const updatedSession = {
         ...session,
+        token: data.token || session.token,
         device: {
           ...session.device,
           device_key: newKey,

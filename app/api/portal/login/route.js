@@ -60,21 +60,28 @@ export async function POST(request) {
 
     const cleanKey = device_key.trim();
     const rateLimitIdentifier = `${clientIp}:${normalizedMac}`;
+    const macLockKey = `mac_lock:${normalizedMac}`;
 
-    // Check rate limit against brute-forcing
+    // Check rate limit against brute-forcing (per IP+MAC and globally per MAC)
     const rateCheck = checkLoginRateLimit(rateLimitIdentifier, 5, 15 * 60 * 1000);
-    if (!rateCheck.allowed) {
+    const macRateCheck = checkLoginRateLimit(macLockKey, 10, 15 * 60 * 1000);
+    if (!rateCheck.allowed || !macRateCheck.allowed) {
+      const retryAfter = Math.max(
+        rateCheck.retryAfterSeconds || 0,
+        macRateCheck.retryAfterSeconds || 0,
+        60,
+      );
       return NextResponse.json(
         {
           success: false,
           error:
             'تم حظر المحاولات مؤقتاً بسبب تكرار إدخال بيانات خاطئة. يرجى المحاولة بعد 15 دقيقة.',
-          retry_after: rateCheck.retryAfterSeconds,
+          retry_after: retryAfter,
         },
         {
           status: 429,
           headers: {
-            'Retry-After': String(rateCheck.retryAfterSeconds),
+            'Retry-After': String(retryAfter),
           },
         },
       );
@@ -98,6 +105,7 @@ export async function POST(request) {
     // Verify existence and device_key
     if (!device || !safeEquals(cleanKey, device.device_key)) {
       recordFailedLogin(rateLimitIdentifier, 15 * 60 * 1000);
+      recordFailedLogin(macLockKey, 15 * 60 * 1000);
       return NextResponse.json(
         {
           success: false,
@@ -109,6 +117,7 @@ export async function POST(request) {
 
     // Successful login: reset rate limiter
     resetLoginRateLimit(rateLimitIdentifier);
+    resetLoginRateLimit(macLockKey);
 
     // Calculate real-time status and days remaining
     const statusInfo = calculateDeviceStatus(device);
@@ -121,10 +130,11 @@ export async function POST(request) {
       device.status = statusInfo.status;
     }
 
-    // Generate signed portal session token
+    // Generate signed portal session token bound to the active device_key fingerprint
     const token = createPortalToken({
       device_id: device.id,
       mac_address: device.mac_address,
+      device_key: device.device_key,
     });
 
     return NextResponse.json({
