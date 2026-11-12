@@ -590,14 +590,24 @@ button {
   .portal-login-layout {
     display: flex;
     flex-direction: column;
-    gap: 15px;
+    gap: 18px;
     margin-top: 0;
   }
 
+  .portal-login-card {
+    order: 1;
+    padding: 28px 20px !important;
+    border-radius: 20px !important;
+  }
+
+  .portal-login-card input {
+    font-size: 16px !important;
+  }
+
   .login-hero {
-    order: -1;
+    order: 2;
     min-height: 0;
-    padding: 24px 23px 20px;
+    padding: 24px 22px 20px;
     border-radius: 20px;
   }
 
