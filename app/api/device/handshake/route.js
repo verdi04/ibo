@@ -154,6 +154,21 @@ export async function POST(request) {
 
       resetLoginRateLimit(keyRateLimitKey);
       resetLoginRateLimit(macLockKey);
+
+      // Update last_seen_at and repair missing trial_ends_at for legacy trial records
+      const updates = { last_seen_at: now.toISOString() };
+      if (!existingDevice.trial_ends_at && !existingDevice.license_expires_at) {
+        const repairedTrial = new Date(
+          now.getTime() + 7 * 24 * 60 * 60 * 1000,
+        ).toISOString();
+        updates.trial_ends_at = repairedTrial;
+        existingDevice.trial_ends_at = repairedTrial;
+      }
+
+      await supabase
+        .from('devices')
+        .update(updates)
+        .eq('id', existingDevice.id);
     }
 
     let device = existingDevice;
