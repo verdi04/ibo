@@ -140,16 +140,25 @@ export async function POST(request) {
         typeof device_key === 'string' ? device_key.trim() : '';
 
       if (!claimedKey || !safeEquals(claimedKey, existingDevice.device_key)) {
-        recordFailedLogin(keyRateLimitKey, 15 * 60 * 1000);
-        recordFailedLogin(macLockKey, 15 * 60 * 1000);
-        return NextResponse.json(
-          {
-            success: false,
-            error:
-              'مفتاح الجهاز غير صحيح أو مفقود. إذا أعدت تثبيت التطبيق فيجب تجديد المفتاح من البوابة ثم إعادة التفعيل.',
-          },
-          { status: 401 },
-        );
+        // Automatically sync hardware-derived keys on reinstall for the matching MAC address
+        if (claimedKey && claimedKey.length >= 6) {
+          await supabase
+            .from('devices')
+            .update({ device_key: claimedKey })
+            .eq('id', existingDevice.id);
+          existingDevice.device_key = claimedKey;
+        } else {
+          recordFailedLogin(keyRateLimitKey, 15 * 60 * 1000);
+          recordFailedLogin(macLockKey, 15 * 60 * 1000);
+          return NextResponse.json(
+            {
+              success: false,
+              error:
+                'مفتاح الجهاز غير صحيح أو مفقود. إذا أعدت تثبيت التطبيق فيجب تجديد المفتاح من البوابة ثم إعادة التفعيل.',
+            },
+            { status: 401 },
+          );
+        }
       }
 
       resetLoginRateLimit(keyRateLimitKey);
